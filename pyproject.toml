@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trovus"
+version = "0.1.0"
+description = "trovus is a library dedicated towards efficient frontier research of fine-tuning Small Language Models"
+authors = [
+    {name = "Trovus Research Team"},
+    {name = "Akshath Mangudi", email = "akshathmangudi@gmail.com"}
+]
+
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+    "huggingface_hub>=0.20.0",
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
+    "rapidfuzz>=3.0.0",
+]
