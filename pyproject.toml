@@ -21,4 +21,4 @@ dependencies = [
     "rapidfuzz>=3.0.0",
 ]
 [project.scripts]
-using-trovus = "trovus.cli:main"
+trovus = "trovus.cli:main"
