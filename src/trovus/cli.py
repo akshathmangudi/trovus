@@ -2,13 +2,14 @@
 """
 Trovus CLI - HuggingFace Model Search Engine
 
-A command-line interface for searching and retrieving model cards from HuggingFace Hub.
+A command-line interface for searching, downloading, and managing models from HuggingFace Hub.
 This serves as the foundation for building efficiency frontier research on small language models.
 
 Authors: Trovus Research Team
 """
 
 import sys
+import argparse
 from typing import List, Optional
 
 from huggingface_hub import HfApi
@@ -19,6 +20,11 @@ from rich import print as rprint
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import WordCompleter
 from rapidfuzz import fuzz, process
+
+# Import our new modules
+from .download import add_download_subparser
+from .model_manager import add_management_subparsers
+from .card_parser import add_card_parser_subcommands
 
 
 # Initialize Rich console for beautiful output
@@ -175,26 +181,67 @@ class ModelSearchEngine:
             # Clean the query but don't over-preprocess
             cleaned_query = self.preprocess_query(query)
             
-            # Use HuggingFace's advanced search parameters
+            # Try multiple search strategies for better results
+            all_results = []
+            
+            # Strategy 1: Direct search
             search_params = {
                 'search': cleaned_query,
-                'limit': limit * 5,  # Get more results for better fuzzy filtering
+                'limit': limit * 3,  # Get more results for better fuzzy filtering
                 'sort': 'downloads',  # Sort by popularity
                 'direction': -1,  # Descending order
-                'task': 'text-generation',  # Focus on language models
-                'library': 'transformers',  # Standard ML library
+                # Removed task and library filters to be more inclusive
             }
             
             # Add additional filters if provided
             if filter_options:
                 search_params.update(filter_options)
             
-            # Search models using HuggingFace API with advanced parameters
+            # Search models using HuggingFace API with direct query
             models = list(self.api.list_models(**search_params))
+            all_results.extend(models)
+            
+            # Strategy 2: If query contains multiple words (like "microsoft deberta"), 
+            # try searching for combinations and individual terms
+            query_words = cleaned_query.lower().split()
+            if len(query_words) > 1:
+                # Try different combinations
+                search_variations = []
+                
+                # Try with dash separator (common in model names)
+                dash_query = "-".join(query_words)
+                search_variations.append(dash_query)
+                
+                # Try with slash separator (for org/model format)
+                if len(query_words) == 2:
+                    slash_query = "/".join(query_words)
+                    search_variations.append(slash_query)
+                
+                # Try individual words (especially useful for org names)
+                for word in query_words:
+                    if len(word) > 2:  # Skip very short words
+                        search_variations.append(word)
+                
+                # Search with each variation
+                for variation in search_variations:
+                    try:
+                        search_params['search'] = variation
+                        variation_models = list(self.api.list_models(**search_params))
+                        all_results.extend(variation_models)
+                    except Exception:
+                        continue  # Skip failed searches
+            
+            # Remove duplicates by model ID
+            seen_ids = set()
+            unique_results = []
+            for model in all_results:
+                if model.id not in seen_ids:
+                    seen_ids.add(model.id)
+                    unique_results.append(model)
             
             # Convert to dictionaries with relevant information
             results = []
-            for model in models:
+            for model in unique_results:
                 model_info = {
                     'id': model.id,
                     'author': model.author or 'Unknown',
@@ -206,6 +253,17 @@ class ModelSearchEngine:
             
             # Apply smart filtering for small language models using original query and preference
             filtered_results = self.filter_small_language_models(results, query, preference)
+            
+            # Strategy 3: If we still have few/no results, use the suggestions system
+            if len(filtered_results) < 2:
+                suggestions = self.get_suggestions(query, limit=limit * 2)
+                if suggestions:
+                    # Apply the same filtering to suggestions
+                    suggestion_filtered = self.filter_small_language_models(suggestions, query, preference)
+                    # Merge with existing results, prioritizing original results
+                    for suggestion in suggestion_filtered:
+                        if suggestion['id'] not in [r['id'] for r in filtered_results]:
+                            filtered_results.append(suggestion)
             
             # Return top results
             return filtered_results[:limit]
@@ -227,27 +285,50 @@ class ModelSearchEngine:
         """
         try:
             # Cast a wider net with relaxed search parameters
+            all_results = []
+            
+            # Strategy 1: Try the original query with relaxed parameters
             search_params = {
                 'search': query.strip(),
                 'limit': 50,  # Get many results for better suggestions
                 'sort': 'downloads',
                 'direction': -1,
-                'task': 'text-generation',
-                'library': 'transformers',
             }
             
             models = list(self.api.list_models(**search_params))
+            all_results.extend(models)
             
-            if not models:
-                # If still no results, try with just the first word
+            # Strategy 2: If query has multiple words, try individual words
+            query_words = query.strip().lower().split()
+            if len(query_words) > 1:
+                for word in query_words:
+                    if len(word) > 2:  # Skip short words
+                        try:
+                            search_params['search'] = word
+                            word_models = list(self.api.list_models(**search_params))
+                            all_results.extend(word_models)
+                        except Exception:
+                            continue
+            
+            # Strategy 3: If still no results, try with just the first word
+            if not all_results:
                 first_word = query.strip().split()[0] if query.strip() else ""
-                if first_word:
+                if first_word and len(first_word) > 2:
                     search_params['search'] = first_word
                     models = list(self.api.list_models(**search_params))
+                    all_results.extend(models)
+            
+            # Remove duplicates
+            seen_ids = set()
+            unique_models = []
+            for model in all_results:
+                if model.id not in seen_ids:
+                    seen_ids.add(model.id)
+                    unique_models.append(model)
             
             # Convert to our format
             results = []
-            for model in models:
+            for model in unique_models:
                 model_info = {
                     'id': model.id,
                     'author': model.author or 'Unknown',
@@ -264,14 +345,14 @@ class ModelSearchEngine:
                     query, 
                     model_names, 
                     scorer=fuzz.partial_ratio,
-                    limit=limit * 2  # Get more for filtering
+                    limit=limit * 3  # Get more for filtering
                 )
                 
                 # Filter suggestions and add fuzzy scores
                 suggestions = []
                 for match in fuzzy_matches:
                     match_name, score = match[0], match[1]  # Explicit unpacking
-                    if score > 20:  # Very permissive for suggestions
+                    if score > 15:  # Very permissive for suggestions
                         model = next((m for m in results if m['id'] == match_name), None)
                         if model:
                             model['fuzzy_score'] = score
@@ -613,19 +694,56 @@ def main():
     """
     Main entry point for the Trovus CLI.
     """
-    if len(sys.argv) > 1:
-        # Handle command-line arguments (for future expansion)
-        command = sys.argv[1]
-        if command in ['-h', '--help']:
-            console.print("[bold]Trovus - HuggingFace Model Search Engine[/bold]")
-            console.print("\nUsage: python -m trovus")
-            console.print("       trovus  (if installed as package)")
-            console.print("\nCommands:")
-            console.print("  Interactive search mode (default)")
-            return
+    # Create argument parser with subcommands
+    parser = argparse.ArgumentParser(
+        prog='trovus',
+        description='Trovus - HuggingFace Model Search and Download Engine',
+        epilog='For detailed help on subcommands, use: trovus <command> --help'
+    )
     
-    # Run interactive search
-    interactive_search()
+    # Create subparsers for different commands
+    subparsers = parser.add_subparsers(
+        title='Commands',
+        description='Available commands',
+        dest='command',
+        help='Command to run'
+    )
+    
+    # Add search command (interactive mode)
+    search_parser = subparsers.add_parser(
+        'search',
+        help='Interactive model search (default mode)',
+        description='Search for models interactively'
+    )
+    search_parser.set_defaults(func=lambda args: interactive_search())
+    
+    # Add download-related subcommands
+    add_download_subparser(subparsers)
+    
+    # Add model management subcommands
+    add_management_subparsers(subparsers)
+    
+    # Add model card parsing subcommands
+    add_card_parser_subcommands(subparsers)
+    
+    # Parse arguments
+    if len(sys.argv) == 1:
+        # No arguments provided, run interactive search (default behavior)
+        interactive_search()
+        return
+    
+    args = parser.parse_args()
+    
+    # Handle help and version
+    if args.command is None:
+        parser.print_help()
+        return
+    
+    # Execute the appropriate function
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
