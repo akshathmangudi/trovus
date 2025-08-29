@@ -108,5 +108,8 @@ To-do:
 - [X] Implement the search retriever + model card downloader. 
 - [X] Convert "python -m trovus" into a universal command: "using trovus" 
 - [X] Include ability to download model weights. 
-- [ ] Implement the first set of fine-tuning techniques and employ them on the first model. 
-- [ ] Will add more steps once step 3 is complete.
+- [ ] Prepare the dataset for question-answer geneation + pairs. 
+- [ ] Finalize fine-tuning techniques and publish dataset onto HF Hub. 
+- [ ] Implement the fine-tuning metrics which will be the foundation for the efficiency frontiers. 
+- [ ] Have the efficiency frontiers be saved in a reproducible and visualizable format. 
+- [ ] Start with finetuning the easiest technique onto the smallest model for starters. 
