@@ -19,7 +19,6 @@ trovus search
 trovus download microsoft/deberta-v3-small --output-dir ./models --research-mode
 
 # Download minimal files only
-trovus download Qwen/Qwen3-0.6B --minimal
 
 # Custom file patterns
 trovus download microsoft/phi-3-mini --include "*.safetensors" "*.json" --exclude "*.bin"
@@ -69,6 +68,16 @@ trovus remove microsoft/deberta-v3-small
 - `trovus cache-info` - Overall cache statistics
 - `trovus remove <model>` - Remove models from cache
 
+### Evaluate Commands
+- `trovus evaluate <model> --method <sft|cot-d|rl>` - Run teacher-signal evaluation flows
+  - SFT (implemented): launches supervised fine-tuning with LoRA/TRL on a registered dataset
+  - CoT-D / RL (stubs): records config and prepares output directories for upcoming pipelines
+  - Key flags:
+    - `--dataset` (default `gsm8k`)
+    - `--epochs`, `--learning-rate`, `--per-device-train-batch-size`, `--gradient-accumulation-steps`
+    - `--use-4bit` for 4-bit quantization, `--lora-rank`, `--target-modules`
+    - `--output-dir` for run artifacts, `--cache-dir` for HF cache overrides
+
 ## Download Modes
 
 ### Research Mode (`--research-mode`)
@@ -93,6 +102,9 @@ trovus download microsoft/deberta-v3-small --output-dir ./models --research-mode
 
 # Quick download for inference
 trovus download Qwen/Qwen3-0.6B --minimal --output-dir ./models
+
+# Fine-tune a locally cached model with SFT (LoRA defaults)
+trovus evaluate Qwen/Qwen3-0.6B --method sft --dataset gsm8k --epochs 10
 
 # Custom download with specific files
 trovus download microsoft/phi-3-mini \

@@ -8,8 +8,9 @@ This serves as the foundation for building efficiency frontier research on small
 Authors: Trovus Research Team
 """
 
-import sys
 import argparse
+import sys
+from pathlib import Path
 from typing import List, Optional
 
 from huggingface_hub import HfApi
@@ -25,6 +26,15 @@ from rapidfuzz import fuzz, process
 from .download import add_download_subparser
 from .model_manager import add_management_subparsers
 from .card_parser import add_card_parser_subcommands
+from .evaluate import (
+    DEFAULT_LORA_TARGET_MODULES,
+    CoTDistillationConfig,
+    RLTrainingConfig,
+    SFTMethodConfig,
+    run_cot_distillation_stub,
+    run_rl_training_stub,
+    run_sft_pipeline,
+)
 
 
 # Initialize Rich console for beautiful output
@@ -690,6 +700,161 @@ def interactive_search():
             console.print(f"\n[red]Error: {e}[/red]")
 
 
+def evaluate_command(args):
+    """
+    Dispatch the evaluate subcommand.
+    """
+    method = args.method.lower()
+    output_dir = args.output_dir or "./runs"
+
+    if method == "sft":
+        target_modules = args.target_modules or DEFAULT_LORA_TARGET_MODULES.copy()
+        config = SFTMethodConfig(
+            dataset=args.dataset,
+            dataset_split=args.dataset_split,
+            eval_split=args.eval_split,
+            output_dir=output_dir,
+            cache_dir=args.cache_dir,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            per_device_train_batch_size=args.per_device_train_batch_size,
+            per_device_eval_batch_size=args.per_device_eval_batch_size,
+            weight_decay=args.weight_decay,
+            warmup_ratio=args.warmup_ratio,
+            logging_steps=args.logging_steps,
+            save_steps=args.save_steps,
+            eval_steps=args.eval_steps,
+            max_steps=args.max_steps,
+            max_seq_length=args.max_seq_length,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=target_modules,
+            use_4bit=args.use_4bit,
+            bf16=args.bf16,
+            fp16=args.fp16,
+            gradient_checkpointing=not args.no_gradient_checkpointing,
+            seed=args.seed,
+            report_to=args.report_to,
+            push_to_hub=args.push_to_hub,
+            force_download_model=args.force_download,
+            merge_lora_after_training=args.merge_lora,
+        )
+        result = run_sft_pipeline(args.model, config)
+        console.print("\n[bold green]SFT run completed successfully![/bold green]")
+        console.print(f"Run directory: {result.run_dir}")
+        if result.metrics:
+            console.print("Key metrics:")
+            for key, value in result.metrics.items():
+                console.print(f"  • {key}: {value}")
+        return
+
+    if method == "cot-d":
+        config = CoTDistillationConfig(
+            dataset=args.dataset,
+            output_dir=Path(output_dir) / "cot-d" / args.dataset,
+            teacher_model=args.teacher_model,
+            notes=args.notes,
+        )
+        run_cot_distillation_stub(config)
+        return
+
+    if method == "rl":
+        config = RLTrainingConfig(
+            dataset=args.dataset,
+            output_dir=Path(output_dir) / "rl" / args.dataset,
+            reward_model=args.reward_model,
+            notes=args.notes,
+        )
+        run_rl_training_stub(config)
+        return
+
+    console.print(f"[red]Unknown method '{args.method}'.[/red]")
+
+
+def add_evaluate_subparser(subparsers):
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="Fine-tune and evaluate teacher signals on small language models",
+        description="Run supervised fine-tuning (SFT) or placeholder pipelines for other teacher signals.",
+    )
+
+    evaluate_parser.add_argument("model", help="Model identifier, e.g. Qwen/Qwen3-0.6B")
+    evaluate_parser.add_argument(
+        "--method",
+        choices=["sft", "cot-d", "rl"],
+        default="sft",
+        help="Teacher signal method to run (default: sft).",
+    )
+    evaluate_parser.add_argument("--dataset", default="gsm8k", help="Dataset key registered in Trovus (default: gsm8k).")
+    evaluate_parser.add_argument("--dataset-split", help="Override the training split for the dataset.")
+    evaluate_parser.add_argument("--eval-split", help="Override the evaluation split for the dataset.")
+    evaluate_parser.add_argument("--output-dir", default="./runs", help="Directory to store run artifacts.")
+    evaluate_parser.add_argument("--cache-dir", help="Optional Hugging Face cache directory to use.")
+    evaluate_parser.add_argument("--epochs", type=float, default=1.0, help="Number of training epochs (can be fractional).")
+    evaluate_parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate for fine-tuning.")
+    evaluate_parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps to simulate larger batches.",
+    )
+    evaluate_parser.add_argument(
+        "--per-device-train-batch-size",
+        type=int,
+        default=1,
+        help="Per-device batch size for training (before accumulation).",
+    )
+    evaluate_parser.add_argument(
+        "--per-device-eval-batch-size",
+        type=int,
+        default=1,
+        help="Per-device batch size for evaluation.",
+    )
+    evaluate_parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay applied to optimisers.")
+    evaluate_parser.add_argument("--warmup-ratio", type=float, default=0.03, help="Warmup ratio for the scheduler.")
+    evaluate_parser.add_argument("--logging-steps", type=int, default=10, help="Logging frequency in steps.")
+    evaluate_parser.add_argument("--save-steps", type=int, default=200, help="Checkpoint save frequency in steps.")
+    evaluate_parser.add_argument("--eval-steps", type=int, help="Evaluation frequency in steps (defaults to save-steps).")
+    evaluate_parser.add_argument("--max-steps", type=int, help="Optional cap on total optimisation steps.")
+    evaluate_parser.add_argument("--max-seq-length", type=int, default=2048, help="Maximum sequence length for training.")
+    evaluate_parser.add_argument("--lora-rank", type=int, default=16, help="Rank (r) used for the LoRA adapters.")
+    evaluate_parser.add_argument("--lora-alpha", type=int, default=32, help="Alpha scaling factor for LoRA.")
+    evaluate_parser.add_argument("--lora-dropout", type=float, default=0.05, help="Dropout applied within LoRA layers.")
+    evaluate_parser.add_argument(
+        "--target-modules",
+        nargs="+",
+        help="Override the target modules for LoRA injection (default: Q/K/V/O projections).",
+    )
+    evaluate_parser.add_argument("--use-4bit", action="store_true", help="Enable 4-bit quantisation via bitsandbytes.")
+    evaluate_parser.add_argument("--bf16", dest="bf16", action="store_true", default=True, help="Enable bfloat16 training.")
+    evaluate_parser.add_argument("--no-bf16", dest="bf16", action="store_false", help="Disable bfloat16 training.")
+    evaluate_parser.add_argument("--fp16", action="store_true", help="Enable fp16 mixed precision training.")
+    evaluate_parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Disable gradient checkpointing (enabled by default).",
+    )
+    evaluate_parser.add_argument("--seed", type=int, default=42, help="Random seed for training.")
+    evaluate_parser.add_argument(
+        "--report-to",
+        default="none",
+        help="Reporting integrations for Transformers (e.g., wandb, tensorboard, azureml).",
+    )
+    evaluate_parser.add_argument("--push-to-hub", action="store_true", help="Push the trained model artifacts to the Hub.")
+    evaluate_parser.add_argument("--force-download", action="store_true", help="Force re-download of model weights.")
+    evaluate_parser.add_argument(
+        "--merge-lora",
+        action="store_true",
+        help="Merge LoRA adapters into the base model after training (saves under merged_model/).",
+    )
+    evaluate_parser.add_argument("--teacher-model", help="Teacher model ID (for CoT distillation placeholder).")
+    evaluate_parser.add_argument("--reward-model", help="Reward model ID (for RL placeholder).")
+    evaluate_parser.add_argument("--notes", help="Optional notes stored alongside run artifacts.")
+
+    evaluate_parser.set_defaults(func=evaluate_command)
+
 def main():
     """
     Main entry point for the Trovus CLI.
@@ -712,7 +877,7 @@ def main():
     # Add search command (interactive mode)
     search_parser = subparsers.add_parser(
         'search',
-        help='Interactive model search (default mode)',
+        help='Interactive model search',
         description='Search for models interactively'
     )
     search_parser.set_defaults(func=lambda args: interactive_search())
@@ -720,6 +885,9 @@ def main():
     # Add download-related subcommands
     add_download_subparser(subparsers)
     
+    # Add evaluation subcommand
+    add_evaluate_subparser(subparsers)
+
     # Add model management subcommands
     add_management_subparsers(subparsers)
     
@@ -727,14 +895,9 @@ def main():
     add_card_parser_subcommands(subparsers)
     
     # Parse arguments
-    if len(sys.argv) == 1:
-        # No arguments provided, run interactive search (default behavior)
-        interactive_search()
-        return
-    
     args = parser.parse_args()
     
-    # Handle help and version
+    # Handle case when no command is provided - show help
     if args.command is None:
         parser.print_help()
         return

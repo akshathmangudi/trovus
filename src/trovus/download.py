@@ -18,12 +18,16 @@ import re
 from huggingface_hub import snapshot_download, hf_hub_download, HfApi, hf_hub_url
 from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.prompt import Confirm
 from rich import print as rprint
 
 console = Console()
+
+# Note: HuggingFace Hub's default tqdm already shows:
+# - File counting progress (e.g., "Fetching 4 files")
+# - Per-file download progress with speed and time remaining
+# We don't need to customize it - the default behavior is good
 
 
 class ModelDownloader:
@@ -81,7 +85,12 @@ class ModelDownloader:
             Model information dictionary or None if error
         """
         try:
-            model_info = self.api.model_info(repo_id)
+            # Get model info - try with files_metadata if available, otherwise without
+            try:
+                model_info = self.api.model_info(repo_id, files_metadata=True)
+            except TypeError:
+                # If files_metadata parameter doesn't exist, try without it
+                model_info = self.api.model_info(repo_id)
             
             # Calculate approximate size from files
             total_size = 0
@@ -89,12 +98,45 @@ class ModelDownloader:
             
             if hasattr(model_info, 'siblings') and model_info.siblings:
                 for file in model_info.siblings:
-                    if hasattr(file, 'size') and file.size:
-                        total_size += file.size
+                    # Try multiple ways to get file size
+                    file_size = None
+                    
+                    # Method 1: Direct size attribute (most common)
+                    if hasattr(file, 'size'):
+                        size_val = file.size
+                        if size_val is not None and (isinstance(size_val, (int, float)) and size_val > 0):
+                            file_size = int(size_val)
+                    
+                    # Method 2: Check for size_bytes attribute
+                    if file_size is None and hasattr(file, 'size_bytes'):
+                        size_val = file.size_bytes
+                        if size_val is not None and (isinstance(size_val, (int, float)) and size_val > 0):
+                            file_size = int(size_val)
+                    
+                    # Method 3: Check LFS pointer file size (for large files)
+                    if file_size is None and hasattr(file, 'lfs') and file.lfs:
+                        if hasattr(file.lfs, 'size'):
+                            size_val = file.lfs.size
+                            if size_val is not None and (isinstance(size_val, (int, float)) and size_val > 0):
+                                file_size = int(size_val)
+                        elif hasattr(file.lfs, 'size_bytes'):
+                            size_val = file.lfs.size_bytes
+                            if size_val is not None and (isinstance(size_val, (int, float)) and size_val > 0):
+                                file_size = int(size_val)
+                    
+                    # Get filename
+                    filename = getattr(file, 'rfilename', None) or getattr(file, 'filename', None)
+                    
+                    if filename:
+                        # Always add file info, even if size is unknown
                         file_info.append({
-                            "filename": file.rfilename,
-                            "size": file.size
+                            "filename": filename,
+                            "size": file_size if file_size is not None else 0
                         })
+                        
+                        # Add to total only if we have a valid size
+                        if file_size is not None and file_size > 0:
+                            total_size += file_size
             
             return {
                 "repo_id": repo_id,
@@ -190,9 +232,11 @@ class ModelDownloader:
         
         # Show download info
         console.print(f"\n[bold green]Downloading {repo_id}[/bold green]")
-        console.print(f"Total size: {self.format_size(model_info['total_size'])}")
         
         # Filter files if needed
+        filtered_files = []
+        filtered_size = 0
+        
         if include_patterns or exclude_patterns or specific_files:
             filtered_files = self.filter_files(
                 model_info['files'], 
@@ -201,62 +245,74 @@ class ModelDownloader:
                 specific_files
             )
             
-            # Calculate filtered size
-            filtered_size = sum(
-                f["size"] for f in model_info['files'] 
-                if f["filename"] in filtered_files
-            )
+            # Calculate filtered size by matching filenames
+            # Create a dict for quick lookup
+            file_dict = {f["filename"]: f for f in model_info['files']}
             
-            console.print(f"Filtered size: {self.format_size(filtered_size)}")
+            for filename in filtered_files:
+                if filename in file_dict:
+                    file_size = file_dict[filename]["size"]
+                    if file_size > 0:
+                        filtered_size += file_size
+            
+            # Show total size if we have it
+            if model_info['total_size'] > 0:
+                console.print(f"Total size: {self.format_size(model_info['total_size'])}")
+            
+            # Show filtered size and file count
+            if filtered_size > 0:
+                console.print(f"Filtered size: {self.format_size(filtered_size)}")
+            else:
+                console.print(f"Filtered size: [yellow]Unknown (size info unavailable)[/yellow]")
+            
             console.print(f"Files to download: {len(filtered_files)}")
+        else:
+            # No filters, show total size
+            if model_info['total_size'] > 0:
+                console.print(f"Total size: {self.format_size(model_info['total_size'])}")
+            else:
+                console.print(f"Total size: [yellow]Unknown (size info unavailable)[/yellow]")
+            
+            console.print(f"Files to download: {len(model_info['files'])}")
         
-        # Confirm download if large
+        # Confirm download if large (only if we know the size)
         if model_info['total_size'] > 1_000_000_000:  # 1GB
             if not Confirm.ask(f"Model is {self.format_size(model_info['total_size'])}. Continue download?"):
                 console.print("[yellow]Download cancelled.[/yellow]")
                 return None
         
         try:
-            # Download with progress
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                TimeRemainingColumn(),
-                console=console
-            ) as progress:
-                
-                task = progress.add_task(f"Downloading {repo_id}...", total=None)
-                
-                # Use snapshot_download for full downloads or filtered downloads
-                if specific_files and len(specific_files) == 1:
-                    # Single file download
-                    downloaded_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=specific_files[0],
-                        revision=revision,
-                        cache_dir=self.cache_dir,
-                        local_dir=output_dir,
-                        force_download=force_download,
-                        resume_download=resume
-                    )
-                else:
-                    # Multiple files or full repo download
-                    downloaded_path = snapshot_download(
-                        repo_id=repo_id,
-                        revision=revision,
-                        cache_dir=self.cache_dir,
-                        local_dir=output_dir,
-                        allow_patterns=include_patterns,
-                        ignore_patterns=exclude_patterns,
-                        force_download=force_download,
-                        resume_download=resume
-                    )
-                
-                progress.update(task, completed=True)
+            console.print("")  # Add spacing before progress bars
             
-            console.print(f"[bold green]✓ Successfully downloaded to: {downloaded_path}[/bold green]")
+            # Use snapshot_download for full downloads or filtered downloads
+            # HuggingFace Hub's default tqdm will show:
+            # - File counting progress (e.g., "Fetching 4 files")
+            # - Per-file download progress with speed and time remaining
+            if specific_files and len(specific_files) == 1:
+                # Single file download
+                downloaded_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=specific_files[0],
+                    revision=revision,
+                    cache_dir=self.cache_dir,
+                    local_dir=output_dir,
+                    force_download=force_download,
+                    resume_download=resume
+                )
+            else:
+                # Multiple files or full repo download
+                downloaded_path = snapshot_download(
+                    repo_id=repo_id,
+                    revision=revision,
+                    cache_dir=self.cache_dir,
+                    local_dir=output_dir,
+                    allow_patterns=include_patterns,
+                    ignore_patterns=exclude_patterns,
+                    force_download=force_download,
+                    resume_download=resume
+                )
+            
+            console.print(f"\n[bold green]✓ Successfully downloaded to: {downloaded_path}[/bold green]")
             return downloaded_path
             
         except Exception as e:
